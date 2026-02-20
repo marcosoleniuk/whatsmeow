@@ -8,6 +8,9 @@ package whatsmeow
 
 import (
 	"context"
+	"fmt"
+	"strconv"
+	"time"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/types"
@@ -118,4 +121,90 @@ func (cli *Client) RejectCall(ctx context.Context, callFrom types.JID, callID st
 			Content: nil,
 		}},
 	})
+}
+
+type CallLinkType string
+
+const (
+	CallLinkTypeAudio CallLinkType = "audio"
+	CallLinkTypeVideo CallLinkType = "video"
+
+	CallLinkAudioPrefix = "https://call.whatsapp.com/voice/"
+	CallLinkVideoPrefix = "https://call.whatsapp.com/video/"
+)
+
+// CreateCallLink asks WhatsApp for a call link token.
+//
+// For scheduled events, pass the event start time as the third parameter.
+//
+//	token, err := cli.CreateCallLink(ctx, whatsmeow.CallLinkTypeVideo, eventStart)
+//	link := whatsmeow.CallLinkVideoPrefix + token
+func (cli *Client) CreateCallLink(ctx context.Context, mediaType CallLinkType, eventStartTime ...time.Time) (string, error) {
+	if cli == nil {
+		return "", ErrClientIsNil
+	}
+	switch mediaType {
+	case CallLinkTypeAudio, CallLinkTypeVideo:
+	default:
+		return "", fmt.Errorf("unsupported call link media type %q", mediaType)
+	}
+
+	reqID := cli.generateRequestID()
+	respChan := cli.waitResponse(reqID)
+
+	linkCreate := waBinary.Node{
+		Tag: "link_create",
+		Attrs: waBinary.Attrs{
+			"media": string(mediaType),
+		},
+	}
+	if len(eventStartTime) > 0 && !eventStartTime[0].IsZero() {
+		linkCreate.Content = []waBinary.Node{{
+			Tag: "event",
+			Attrs: waBinary.Attrs{
+				"start_time": strconv.FormatInt(eventStartTime[0].Unix(), 10),
+			},
+		}}
+	}
+
+	data, err := cli.sendNodeAndGetData(ctx, waBinary.Node{
+		Tag: "call",
+		Attrs: waBinary.Attrs{
+			"id": reqID,
+			"to": "@call",
+		},
+		Content: []waBinary.Node{linkCreate},
+	})
+	if err != nil {
+		cli.cancelResponse(reqID, respChan)
+		return "", err
+	}
+
+	timeout := defaultRequestTimeout
+	var resp *waBinary.Node
+	select {
+	case resp = <-respChan:
+	case <-ctx.Done():
+		cli.cancelResponse(reqID, respChan)
+		return "", ctx.Err()
+	case <-time.After(timeout):
+		cli.cancelResponse(reqID, respChan)
+		return "", ErrIQTimedOut
+	}
+	if isDisconnectNode(resp) {
+		resp, err = cli.retryFrame(ctx, "call link creation", reqID, data, resp, timeout)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	linkCreateResp, ok := resp.GetOptionalChildByTag("link_create")
+	if !ok {
+		return "", fmt.Errorf("unexpected call link response: %s", resp.XMLString())
+	}
+	token := linkCreateResp.AttrGetter().OptionalString("token")
+	if token == "" {
+		return "", fmt.Errorf("call link response didn't contain token: %s", resp.XMLString())
+	}
+	return token, nil
 }

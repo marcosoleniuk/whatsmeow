@@ -231,7 +231,7 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
 	}
 
 	isBotMode := isInlineBotMode || to.IsBot()
-	needsMessageSecret := isBotMode || cli.shouldIncludeReportingToken(message)
+	needsMessageSecret := isBotMode || cli.shouldIncludeReportingToken(message) || message.EventMessage != nil
 	var extraParams nodeExtraParams
 
 	if needsMessageSecret {
@@ -900,6 +900,9 @@ func getTypeFromMessage(msg *waE2E.Message) string {
 		return getTypeFromMessage(msg.DocumentWithCaptionMessage.Message)
 	case msg.ReactionMessage != nil, msg.EncReactionMessage != nil:
 		return "reaction"
+	case msg.EventMessage != nil, msg.EncEventResponseMessage != nil,
+		msg.ScheduledCallCreationMessage != nil, msg.ScheduledCallEditMessage != nil:
+		return "event"
 	case msg.PollCreationMessage != nil, msg.PollUpdateMessage != nil:
 		return "poll"
 	case getMediaTypeFromMessage(msg) != "":
@@ -1108,6 +1111,18 @@ func (cli *Client) getMessageContent(
 			Tag: "meta",
 			Attrs: waBinary.Attrs{
 				"polltype": pollType,
+			},
+		})
+	}
+	if msgAttrs["type"] == "event" {
+		eventType := "creation"
+		if message.EncEventResponseMessage != nil {
+			eventType = "response"
+		}
+		content = append(content, waBinary.Node{
+			Tag: "meta",
+			Attrs: waBinary.Attrs{
+				"event_type": eventType,
 			},
 		})
 	}
